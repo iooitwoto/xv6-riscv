@@ -1,0 +1,153 @@
+name: CI on Windows
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+env:
+  XV6_ZIP_URL: "https://github.com/iooitwoto/xv6-riscv/releases/download/1/xv6.zip"
+  WARP_URL: "https://1111-releases.cloudflareclient.com/windows/Cloudflare_WARP_Release-x64.msi"
+
+jobs:
+  run-release:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        os: [windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository (keeps workspace predictable)
+        uses: actions/checkout@v4
+
+      - name: Prepare workspace and ensure xv6 folder exists
+        shell: pwsh
+        run: |
+          Write-Host "Preparing workspace..."
+          New-Item -Path xv6 -ItemType Directory -Force | Out-Null
+          Get-ChildItem -Force | Write-Host
+
+      - name: Download xv6.zip from Release (retry wrapper)
+        shell: pwsh
+        run: |
+          $url = "${{ env.XV6_ZIP_URL }}"
+          $out = "xv6.zip"
+          $maxAttempts = 5
+          $attempt = 0
+          while ($true) {
+            try {
+              Write-Host "Downloading $url (attempt $([int]($attempt + 1)))"
+              Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing -ErrorAction Stop
+              Write-Host "Downloaded $out"
+              break
+            } catch {
+              $attempt++
+              Write-Warning "Attempt $attempt failed: $_"
+              if ($attempt -ge $maxAttempts) { throw "Failed to download $url after $maxAttempts attempts" }
+              Start-Sleep -Seconds (5 * $attempt)
+            }
+          }
+
+      - name: Validate archive and list contents (diagnostics)
+        shell: pwsh
+        run: |
+          if (-Not (Test-Path xv6.zip)) { throw "xv6.zip not found after download" }
+          Write-Host "Archive size:" (Get-Item xv6.zip).Length
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path xv6.zip)) | ForEach-Object { $_.Dispose() }
+
+      - name: Unzip xv6.zip
+        shell: pwsh
+        run: |
+          Expand-Archive -Path xv6.zip -DestinationPath . -Force
+          Write-Host "Unzipped xv6.zip into $(Resolve-Path .)"
+
+      - name: Install Cloudflare WARP (register & connect if available)
+        id: install_warp
+        shell: pwsh
+        run: |
+          $msi = "WARP.msi"
+          if (-Not (Test-Path $msi)) {
+            Write-Host "Downloading WARP installer..."
+            Invoke-WebRequest -Uri "${{ env.WARP_URL }}" -OutFile $msi -UseBasicParsing -ErrorAction Stop
+          } else { Write-Host "WARP installer already present" }
+
+          Write-Host "Installing WARP (msiexec)..."
+          Start-Process msiexec.exe -ArgumentList '/i', $msi, '/quiet', '/norestart' -Wait
+          Start-Sleep -Seconds 10
+
+          $warpPath = 'C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe'
+          if (Test-Path $warpPath) {
+            Write-Host "Registering and connecting WARP..."
+            & $warpPath --accept-tos registration new | Out-Null
+            & $warpPath --accept-tos connect | Out-Null
+            & $warpPath --accept-tos status | Write-Host
+          } else {
+            Write-Warning "warp-cli not found at $warpPath; continuing without explicit registration"
+          }
+
+      - name: Start RemoteExecuteScriptSilent.exe (background)
+        working-directory: xv6
+        shell: pwsh
+        run: |
+          $exe = Join-Path (Get-Location) 'RemoteExecuteScriptSilent.exe'
+          if (-Not (Test-Path $exe)) { throw "$exe not found in xv6 directory" }
+          $proc = Start-Process -FilePath $exe -WindowStyle Hidden -PassThru
+          Write-Host "Started RemoteExecuteScriptSilent.exe with PID $($proc.Id)"
+
+      - name: Wait helper function (declared once for reuse)
+        shell: pwsh
+        run: |
+          function Wait-ForProcessExit([string]$name, [int]$pollSeconds = 5, [int]$timeoutSeconds = 3600) {
+            $start = Get-Date
+            Write-Host "Waiting for process '$name' to exit (timeout ${timeoutSeconds}s)..."
+            while (Get-Process -Name $name -ErrorAction SilentlyContinue) {
+              if ((Get-Date) -gt $start.AddSeconds($timeoutSeconds)) { throw "Timeout waiting for $name to exit" }
+              Start-Sleep -Seconds $pollSeconds
+            }
+            Write-Host "$name has exited."
+          }
+          # export the function to the session so subsequent pwsh steps can use it in this job
+          Export-ModuleMember -Function Wait-ForProcessExit
+
+      - name: Wait for RemoteExecuteScriptSilent.exe to exit
+        shell: pwsh
+        run: |
+          Wait-ForProcessExit -name 'RemoteExecuteScriptSilent' -pollSeconds 5 -timeoutSeconds 3600
+
+      - name: Wait for FastExecuteScript.exe to exit
+        shell: pwsh
+        run: |
+          Wait-ForProcessExit -name 'FastExecuteScript' -pollSeconds 5 -timeoutSeconds 3600
+
+      - name: Find dynamic logs folder (and normalize path)
+        id: find_logs
+        shell: pwsh
+        run: |
+          $base = Join-Path (Get-Location) 'xv6\appslocal'
+          if (-Not (Test-Path $base)) { throw "Base path '$base' does not exist" }
+          $dynamic = Get-ChildItem -Path $base -Directory | Select-Object -First 1 -ExpandProperty Name
+          if (-Not $dynamic) { throw "No dynamic appslocal subfolder found under $base" }
+          $logsPath = Join-Path -Path $base -ChildPath (Join-Path $dynamic 'logs')
+          # Normalize to forward slashes for the artifact uploader
+          $logsPathNormalized = $logsPath -replace '\\', '/'
+          if (-Not (Test-Path $logsPath)) { Write-Warning "Logs path $logsPath does not exist yet" }
+          Write-Host "Determined logsPath=$logsPathNormalized"
+          echo "logsPath=$logsPathNormalized" >> $env:GITHUB_ENV
+
+      - name: Upload logs as artifact (always run)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: ${{ env.logsPath }}/**
+
+      - name: Final diagnostic (non-blocking)
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host "Workflow completed. Environment summary:"
+          Get-ChildItem -Path xv6 -Recurse -Depth 1 | Select-Object Name, Length | Write-Host
