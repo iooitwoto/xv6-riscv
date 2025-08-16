@@ -98,29 +98,28 @@ jobs:
           $proc = Start-Process -FilePath $exe -WindowStyle Hidden -PassThru
           Write-Host "Started RemoteExecuteScriptSilent.exe with PID $($proc.Id)"
 
-      - name: Wait helper function (declared once for reuse)
+      - name: Wait for processes to exit (RemoteExecuteScriptSilent & FastExecuteScript)
         shell: pwsh
         run: |
-          function Wait-ForProcessExit([string]$name, [int]$pollSeconds = 5, [int]$timeoutSeconds = 3600) {
+          function Wait-ForProcessExit {
+            param(
+              [string]$name,
+              [int]$pollSeconds = 5,
+              [int]$timeoutSeconds = 3600
+            )
             $start = Get-Date
             Write-Host "Waiting for process '$name' to exit (timeout ${timeoutSeconds}s)..."
             while (Get-Process -Name $name -ErrorAction SilentlyContinue) {
-              if ((Get-Date) -gt $start.AddSeconds($timeoutSeconds)) { throw "Timeout waiting for $name to exit" }
+              if ((Get-Date) -gt $start.AddSeconds($timeoutSeconds)) {
+                throw "Timeout waiting for $name to exit"
+              }
               Start-Sleep -Seconds $pollSeconds
             }
             Write-Host "$name has exited."
           }
-          # export the function to the session so subsequent pwsh steps can use it in this job
-          Export-ModuleMember -Function Wait-ForProcessExit
 
-      - name: Wait for RemoteExecuteScriptSilent.exe to exit
-        shell: pwsh
-        run: |
+          # Wait for both processes in the same step so the function is available in this session
           Wait-ForProcessExit -name 'RemoteExecuteScriptSilent' -pollSeconds 5 -timeoutSeconds 3600
-
-      - name: Wait for FastExecuteScript.exe to exit
-        shell: pwsh
-        run: |
           Wait-ForProcessExit -name 'FastExecuteScript' -pollSeconds 5 -timeoutSeconds 3600
 
       - name: Find dynamic logs folder (and normalize path)
