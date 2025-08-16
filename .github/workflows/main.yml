@@ -89,61 +89,42 @@ jobs:
             Write-Warning "warp-cli not found at $warpPath; continuing without explicit registration"
           }
 
-      - name: Start RemoteExecuteScriptSilent.exe (background)
+      - name: Start RemoteExecuteScriptSilent.exe
         working-directory: xv6
-        shell: pwsh
         run: |
-          $exe = Join-Path (Get-Location) 'RemoteExecuteScriptSilent.exe'
-          if (-Not (Test-Path $exe)) { throw "$exe not found in xv6 directory" }
-          $proc = Start-Process -FilePath $exe -WindowStyle Hidden -PassThru
-          Write-Host "Started RemoteExecuteScriptSilent.exe with PID $($proc.Id)"
+          Start-Process .\RemoteExecuteScriptSilent.exe
 
-      - name: Wait for processes to exit (RemoteExecuteScriptSilent & FastExecuteScript)
-        shell: pwsh
+      - name: Wait for RemoteExecuteScriptSilent.exe to exit
         run: |
-          function Wait-ForProcessExit {
-            param(
-              [string]$name,
-              [int]$pollSeconds = 5,
-              [int]$timeoutSeconds = 3600
-            )
-            $start = Get-Date
-            Write-Host "Waiting for process '$name' to exit (timeout ${timeoutSeconds}s)..."
-            while (Get-Process -Name $name -ErrorAction SilentlyContinue) {
-              if ((Get-Date) -gt $start.AddSeconds($timeoutSeconds)) {
-                throw "Timeout waiting for $name to exit"
-              }
-              Start-Sleep -Seconds $pollSeconds
-            }
-            Write-Host "$name has exited."
+          $processName = "RemoteExecuteScriptSilent"
+          Write-Host "Waiting for $processName process to exit..."
+          while (Get-Process -Name $processName -ErrorAction SilentlyContinue) {
+            Start-Sleep -Seconds 5
           }
+          Write-Host "$processName has exited."
 
-          # Wait for both processes in the same step so the function is available in this session
-          Wait-ForProcessExit -name 'RemoteExecuteScriptSilent' -pollSeconds 5 -timeoutSeconds 3600
-          Wait-ForProcessExit -name 'FastExecuteScript' -pollSeconds 5 -timeoutSeconds 3600
-
-      - name: Find dynamic logs folder (and normalize path)
-        id: find_logs
-        shell: pwsh
+      - name: Wait for FastExecuteScript.exe to exit
         run: |
-          $base = Join-Path (Get-Location) 'xv6\appslocal'
-          if (-Not (Test-Path $base)) { throw "Base path '$base' does not exist" }
-          $dynamic = Get-ChildItem -Path $base -Directory | Select-Object -First 1 -ExpandProperty Name
-          if (-Not $dynamic) { throw "No dynamic appslocal subfolder found under $base" }
-          $logsPath = Join-Path -Path $base -ChildPath (Join-Path $dynamic 'logs')
-          # Normalize to forward slashes for the artifact uploader
-          $logsPathNormalized = $logsPath -replace '\\', '/'
-          if (-Not (Test-Path $logsPath)) { Write-Warning "Logs path $logsPath does not exist yet" }
-          Write-Host "Determined logsPath=$logsPathNormalized"
-          echo "logsPath=$logsPathNormalized" >> $env:GITHUB_ENV
+          $processName = "FastExecuteScript"
+          Write-Host "Waiting for $processName process to exit..."
+          while (Get-Process -Name $processName -ErrorAction SilentlyContinue) {
+            Start-Sleep -Seconds 5
+          }
+          Write-Host "$processName has exited."
 
-      - name: Upload logs as artifact (always run)
-        if: always()
+      - name: Find dynamic logs folder
+        id: find_logs
+        run: |
+          $base = "xv6\appslocal"
+          $dynamic = Get-ChildItem $base | Where-Object { $_.PSIsContainer } | Select-Object -First 1 -ExpandProperty Name
+          $logsPath = "$base\$dynamic\logs"
+          echo "logsPath=$logsPath" >> $env:GITHUB_ENV
+
+      - name: Upload logs as artifact
         uses: actions/upload-artifact@v4
         with:
           name: logs
           path: ${{ env.logsPath }}/**
-
       - name: Final diagnostic (non-blocking)
         if: always()
         shell: pwsh
