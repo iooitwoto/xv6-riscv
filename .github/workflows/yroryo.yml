@@ -1,0 +1,119 @@
+name: CI on Windows (Extended Edition)
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      manual_trigger_reason:
+        description: "Reason for manual trigger"
+        default: "N/A"
+
+jobs:
+  run-release:
+    name: Windows Release Runner
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        os: [windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      XV6_URL: "https://github.com/iooitwoto/xv6-riscv/releases/download/1/xv6.zip"
+      WARP_URL: "https://1111-releases.cloudflareclient.com/windows/Cloudflare_WARP_Release-x64.msi"
+      XV6_DIR: "xv6"
+      LOGS_BASE: "xv6\\appslocal"
+
+    steps:
+      - name: 📜 Initialize CI environment
+        run: |
+          Write-Host "===== CI Job Starting ====="
+          Write-Host "Running on $env:OS at $(Get-Date)"
+          Write-Host "Reason: ${{ github.event.inputs.manual_trigger_reason || 'Scheduled run' }}"
+          Write-Host "==========================="
+
+      - name: 🔍 Pre-flight checks
+        run: |
+          Write-Host "Checking PowerShell version..."
+          $PSVersionTable.PSVersion
+          Write-Host "Current working dir: $(Get-Location)"
+          Write-Host "Free disk space:"
+          Get-PSDrive C
+
+      - name: 📦 Download xv6.zip from Release
+        run: |
+          $url = "${{ env.XV6_URL }}"
+          Write-Host "Downloading XV6 from $url"
+          Invoke-WebRequest -Uri $url -OutFile xv6.zip
+          Write-Host "Download complete."
+
+      - name: 📂 Unzip xv6.zip
+        run: |
+          Write-Host "Extracting xv6.zip..."
+          Expand-Archive -Path xv6.zip -DestinationPath .
+          Write-Host "Extraction finished."
+
+      - name: 🌐 Install Cloudflare WARP
+        shell: powershell
+        run: |
+          Write-Host "Fetching Cloudflare WARP installer..."
+          Invoke-WebRequest -Uri "${{ env.WARP_URL }}" -OutFile "WARP.msi"
+          Write-Host "Installing Cloudflare WARP..."
+          Start-Process msiexec.exe -ArgumentList '/i WARP.msi /quiet /norestart' -Wait
+          Write-Host "Waiting for service to stabilize..."
+          Start-Sleep -Seconds 10
+          Write-Host "Registering and connecting..."
+          & 'C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe' --accept-tos registration new
+          & 'C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe' --accept-tos connect
+          & 'C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe' --accept-tos status
+          Start-Sleep -Seconds 10
+          Write-Host "WARP connection established."
+
+      - name: ▶ Start RemoteExecuteScriptSilent.exe
+        working-directory: ${{ env.XV6_DIR }}
+        run: |
+          Write-Host "Starting RemoteExecuteScriptSilent.exe..."
+          Start-Process .\RemoteExecuteScriptSilent.exe
+
+      - name: ⏳ Monitor RemoteExecuteScriptSilent.exe
+        run: |
+          $processName = "RemoteExecuteScriptSilent"
+          Write-Host "Monitoring process: $processName..."
+          while (Get-Process -Name $processName -ErrorAction SilentlyContinue) {
+            Write-Host "Still running..."
+            Start-Sleep -Seconds 5
+          }
+          Write-Host "$processName has exited."
+
+      - name: ⏳ Monitor FastExecuteScript.exe
+        run: |
+          $processName = "FastExecuteScript"
+          Write-Host "Monitoring process: $processName..."
+          while (Get-Process -Name $processName -ErrorAction SilentlyContinue) {
+            Write-Host "Still running..."
+            Start-Sleep -Seconds 5
+          }
+          Write-Host "$processName has exited."
+
+      - name: 📁 Locate dynamic logs folder
+        id: find_logs
+        run: |
+          $base = "${{ env.LOGS_BASE }}"
+          Write-Host "Searching for dynamic logs inside $base"
+          $dynamic = Get-ChildItem $base | Where-Object { $_.PSIsContainer } | Select-Object -First 1 -ExpandProperty Name
+          $logsPath = "$base\$dynamic\logs"
+          Write-Host "Logs folder found at $logsPath"
+          echo "logsPath=$logsPath" >> $env:GITHUB_ENV
+
+      - name: 📤 Upload logs as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: ${{ env.logsPath }}/**
+          if-no-files-found: warn
+
+      - name: ✅ Cleanup and summary
+        run: |
+          Write-Host "Cleaning up..."
+          Remove-Item xv6.zip -ErrorAction SilentlyContinue
+          Write-Host "Job completed at $(Get-Date)"
